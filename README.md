@@ -4,6 +4,8 @@ Este es el código del lado del servidor de éste proyecto. El lado del cliente 
 
 Dicho proyecto se encuentra funcionando en https://home-tools.herokuapp.com/
 
+Entre muchas tecnologías, módulos y paquetes que utiliza el proyecto estan: Sequelize, PostgreSQL y redis
+
 PD: Actualmente solo estan funcionando las rutas relacionadas a usuarios:
 
 Login user ---- /api/user/login ---- POST
