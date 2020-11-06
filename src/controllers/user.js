@@ -2,15 +2,17 @@ import User from '../models/User';
 import bcrypt from 'bcrypt';
 import _ from 'underscore';
 import jwt from 'jsonwebtoken';
-const saltRounds = 10;
-import nodemailer from 'nodemailer';
 import geoip from 'geoip-lite';
-import IPData from 'ipdata';
+import { redisClient } from '../db/redisConnection';
+import { RateLimiterRedis } from 'rate-limiter-flexible';
+import moment from 'moment';
+import mailing from '../modules/mailing';
+import dataAdaptation from '../modules/dataAdaptation';
 
 // Login user
 export async function login(req, res) {
 	try {
-		let body = validator(req.body);
+		let body = await dataAdaptation(req.body);
 
 		if (!body.email || !body.password) {
 			return res.sendStatus(400);
@@ -24,33 +26,39 @@ export async function login(req, res) {
 			return res.sendStatus(404);
 		}
 
-		// decrypt password and compare
-		if (!bcrypt.compareSync(body.password, user.password)) {
-			return res.status(400).json({
-				message: 'Incorrect password.',
-			});
+		const response = await loginRequestControl(user, body.password, req.ip);
+
+		if (response.status !== 200) {
+			if (response.status === 400) {
+				return res.status(response.status).json({
+					message: response.message,
+					remainingPoints: response.remainingPoints,
+				});
+			} else {
+				return res.status(response.status).json({
+					message: 'User blocked.',
+					retryAfter: moment.utc(response.retryAfter * 1000).format('HH:mm:ss'),
+				});
+			}
 		}
 
-		// Hides important properties
-		user = _.pick(user, [
-			'id',
-			'firstName',
-			'lastName',
-			'email',
-			'phone',
-			'active',
-		]);
+		const ip = req.ip || req.ips;
+		const geo = await geoip.lookup(ip);
+		if (geo && emailNotifications) {
+			const params = {
+				email: user.email,
+				geo,
+				ip,
+			};
+			const response = await mailing('login', params);
+			if (response === 'Error') {
+				return res.sendStatus(500);
+			}
+		}
 
-		// Generate token
-		const token = jwt.sign(
-			{
-				data: user,
-			},
-			'HT-2020-Prod',
-			{ expiresIn: '3h' },
-		);
+		user = hidesImportanPropierties(user);
+		const token = generateToken(user);
 
-		// Response
 		return res.json({
 			token,
 		});
@@ -61,10 +69,17 @@ export async function login(req, res) {
 
 // Register new user
 export async function register(req, res) {
-	let body = validator(req.body);
+	let body;
+	try {
+		body = await dataAdaptation(req.body);
 
-	try {    
-		if (!body.firstName || !body.lastName || !body.email || !body.password) {
+		if (
+			!body.firstName ||
+			!body.lastName ||
+			!body.email ||
+			!body.phone ||
+			!body.password
+		) {
 			return res.sendStatus(400);
 		}
 
@@ -77,18 +92,12 @@ export async function register(req, res) {
 		});
 
 		if (newUser) {
-			// Hides important properties
-			newUser = _.pick(newUser, [
-				'id',
-				'firstName',
-				'lastName',
-				'email',
-				'phone',
-				'active',
-			]);
+			newUser = hidesImportanPropierties(newUser);
+			const token = generateToken(newUser);
 
-			// Response
-			return res.json({ newUser });
+			return res.json({
+				token,
+			});
 		}
 	} catch (error) {
 		const registerError = await User.findOne({
@@ -100,7 +109,7 @@ export async function register(req, res) {
 				message: 'Email is already in use.',
 			});
 		} else {
-			return res.sendStatus(500);
+			return res.sendStatus(500).end();
 		}
 	}
 }
@@ -110,34 +119,160 @@ export async function updateUser(req, res) {
 	const { id } = req.user;
 
 	try {
-		let body = validator(req.body);
+		let body = await dataAdaptation(req.body);
 
 		let user = await User.findByPk(id);
 
-		if (user) {
-			user = await user.update({
-				firstName: body.firstName ? body.firstName : user.firstName,
-				lastName: body.lastName ? body.lastName : user.lastName,
-				email: body.email ? body.email : user.email,
-				password: body.passwordEncript ? body.passwordEncript : user.password,
-				phone: body.phone ? body.phone : user.phone,
-				active: body.active !== undefined ? body.active : user.active,
-			});
+		if (!user) {
+			return res.sendStatus(404);
 		}
 
-		// Hides important properties
-		user = _.pick(user, [
-			'id',
-			'firstName',
-			'lastName',
-			'email',
-			'phone',
-			'active',
-		]);
+		user = await user.update({
+			firstName: body.firstName || user.firstName,
+			lastName: body.lastName || user.lastName,
+			email: user.email,
+			password: body.passwordEncript || user.password,
+			phone: body.phone || user.phone,
+			active: body.active !== undefined ? body.active : user.active,
+			emailNotifications:
+				body.emailNotifications !== undefined
+					? body.emailNotifications
+					: user.emailNotifications,
+		});
 
-		res.json({ user });
+		user = hidesImportanPropierties(user);
+		const token = generateToken(user);
+
+		return res.json({
+			token,
+		});
 	} catch (error) {
-		return res.sendStatus(500);
+		return res.sendStatus(500).end();
+	}
+}
+
+// Change email
+export async function changeEmail(req, res) {
+	const { id } = req.user;
+	let body;
+	try {
+		body = await dataAdaptation(req.body);
+		if (!body.email) {
+			return res.sendStatus(400);
+		}
+
+		let user = await User.findByPk(id);
+
+		if (!user) {
+			return res.sendStatus(404);
+		}
+
+		let usersChanged = await User.update(
+			{
+				email: body.email,
+				emailVerificated: false,
+			},
+			{ where: { id } },
+		);
+
+		if (!usersChanged[0]) {
+			return res.sendStatus(404);
+		}
+
+		user.email = body.email;
+		user.emailVerificated = false;
+		user = hidesImportanPropierties(user);
+		const token = generateToken(user);
+
+		return res.json({
+			token,
+		});
+	} catch (error) {
+		const registerError = await User.findOne({
+			where: { email: body.email },
+		});
+
+		if (registerError) {
+			return res.status(400).json({
+				message: 'Email is already in use.',
+			});
+		} else {
+			return res.sendStatus(500).end();
+		}
+	}
+}
+
+// Reset password
+export async function resetPassword(req, res) {
+	try {
+		const request = {
+			email: req.body.email,
+			password: generatePassword(),
+		};
+
+		const body = await dataAdaptation(request);
+		if (!body.email || !body.password) {
+			return res.sendStatus(400);
+		}
+
+		let user = await User.update(
+			{ password: body.passwordEncript },
+			{
+				where: {
+					email: body.email,
+				},
+			},
+		);
+
+		if (!user[0]) {
+			return res.sendStatus(404);
+		}
+
+		const params = {
+			email: body.email,
+			password: body.password,
+		};
+
+		const response = await mailing('resert password', params);
+
+		if (response === 'Error') {
+			return res.sendStatus(500);
+		} else {
+			return res.json({ message: 'Email sent.' });
+		}
+	} catch (error) {
+		return res.sendStatus(500).end();
+	}
+}
+
+// Verify email
+export async function verifyEmail(req, res) {
+	try {
+		const request = {
+			email: req.body.email,
+		};
+
+		const body = await dataAdaptation(request);
+		if (!body.email) {
+			return res.sendStatus(400);
+		}
+
+		let user = await User.update(
+			{ emailVerificated: true },
+			{
+				where: {
+					email: body.email,
+				},
+			},
+		);
+
+		if (!user[0]) {
+			return res.sendStatus(404);
+		}
+
+		return res.json({ message: 'Email verified.' });
+	} catch (error) {
+		return res.sendStatus(500).end();
 	}
 }
 
@@ -154,19 +289,11 @@ export async function deleteUser(req, res) {
 			});
 		}
 
-		// Hides important properties
-		user = _.pick(user, [
-			'id',
-			'firstName',
-			'lastName',
-			'email',
-			'phone',
-			'active',
-		]);
+		user = hidesImportanPropierties(user);
 
 		res.json({ user });
 	} catch (error) {
-		return res.sendStatus(500);
+		return res.sendStatus(500).end();
 	}
 }
 
@@ -185,113 +312,25 @@ export async function deleteUserMaster(req, res) {
 
 		res.json({ user });
 	} catch (error) {
-		return res.sendStatus(500);
+		return res.sendStatus(500).end();
 	}
 }
 
-// Reset password
-export async function resetPassword(req, res) {
-	try {
-		const request = {
-			email: req.params.email,
-			password: generatePassword(),
-		};
-
-		const body = validator(request);
-
-		let user = await User.update(
-			{ password: body.passwordEncript },
-			{
-				where: {
-					email: body.email,
-				},
-			},
-		);
-
-		if (!user[0]) {
-			return res.sendStatus(404);
-		}
-
-		const transporter = nodemailer.createTransport({
-			service: 'gmail',
-			auth: {
-				user: 'contactozabax@gmail.com',
-				pass: 'zabatta96',
-			},
-		});
-		const subject = 'Reinicio de contraseña | Home-tools';
-		const text = `Ha solicitado un reinicio de contraseña, su contraseña actual es: ${body.password} , por favor cambie su contraseña.`;
-		const html = `<p>Ha solicitado un reinicio de contraseña, su contraseña actual es: ${body.password} , por favor cambie su contraseña.</p>`;
-		const mailOptions = {
-			from: 'contactozabax@gmail.com',
-			to: body.email,
-			subject,
-			text,
-			html,
-		};
-
-		await transporter.sendMail(mailOptions, function (error, info) {
-			if (error) {
-				return res.sendStatus(500);
-			} else {
-				return res.json({ message: 'Email sent.' });
-			}
-		});
-	} catch (error) {
-		return res.sendStatus(500);
-	}
-}
-
-export async function test(req, res) {
-  const ipdata = new IPData('ccf58ee0519a5e84f1226d2969d05ccbf04850085182a4b72b33e977');
-  var ip = req.ip
-  var geo2 = await ipdata.lookup(ip)
-  var geo = await geoip.lookup(ip);
-
-  console.log(ip);
-  console.log(geo);
-  console.log(geo2);
-
-if (geo) {
-  
-  console.log(req.ip, `${geo.country} - ${geo.region} - ${geo.city}` );
-}
-}
-
-function validator(req) {
-  let body = {};
-  
-	if (req.firstName && req.firstName.trim()) {
-		body.firstName = specialCharacterReplacement(req.firstName);
-  }
-  
-	if (req.lastName && req.lastName.trim()) {
-		body.lastName = specialCharacterReplacement(req.lastName);
-  }
-  
-	if (req.email && req.email.trim() && req.email.trim().length > 4) {
-		body.email = specialCharacterReplacement(req.email);
-  }
-  
-	if (req.phone && req.phone.length !== 9 && typeof req.phone === 'number') {
-		body.phone = req.phone;
-  }
-  
-	if (req.password && req.password.trim() && req.password.trim().length > 4) {
-		req.password = specialCharacterReplacement(req.password);
-		body.password = req.password;
-		body.passwordEncript = bcrypt.hashSync(req.password, saltRounds);
-  }
-  
-	if (req.active !== undefined && typeof req.active === 'boolean') {
-		body.active = req.active;
-  }
-  
-	return body;
+function hidesImportanPropierties(user) {
+	return (user = _.pick(user, [
+		'id',
+		'firstName',
+		'lastName',
+		'email',
+		'phone',
+		'active',
+		'emailNotifications',
+		'emailVerificated',
+	]));
 }
 
 function generatePassword() {
-	let length = 8,
+	let length = 10,
 		charset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
 		retVal = '';
 	for (let i = 0, n = charset.length; i < length; ++i) {
@@ -300,19 +339,98 @@ function generatePassword() {
 	return retVal;
 }
 
-function specialCharacterReplacement(str) {
-	const charactersInvalid = [
-		{ char: '<', code: '60 ' },
-		{ char: '>', code: '62 ' },
-		{ char: '"', code: '34 ' },
-		{ char: "'", code: '39 ' },
-	];
+function generateToken(user) {
+	return jwt.sign(
+		{
+			data: user,
+		},
+		'HT-2020-Prod',
+		{ expiresIn: '3h' },
+	);
+}
 
-	charactersInvalid.forEach((characterInvalid) => {
-		let re = new RegExp(characterInvalid.char, 'g');
+async function loginRequestControl(user, password, ipAddr) {
+	const maxWrongAttemptsByIPperDay = 10;
+	const maxConsecutiveFailsByUsernameAndIP = 5;
 
-		str = str.replace(re, characterInvalid.code);
+	const limiterSlowBruteByIP = new RateLimiterRedis({
+		storeClient: redisClient,
+		keyPrefix: 'login_fail_ip_per_day',
+		points: maxWrongAttemptsByIPperDay,
+		duration: 60 * 60 * 24,
+		blockDuration: 60 * 60 * 24,
 	});
 
-	return str.trim();
+	const limiterConsecutiveFailsByUsernameAndIP = new RateLimiterRedis({
+		storeClient: redisClient,
+		keyPrefix: 'login_fail_consecutive_username_and_ip',
+		points: maxConsecutiveFailsByUsernameAndIP,
+		duration: 60 * 60 * 24,
+		blockDuration: 60 * 60 * 24,
+	});
+
+	const usernameIPkey = `${user.email}_${ipAddr}`;
+
+	const [resUsernameAndIP, resSlowByIP] = await Promise.all([
+		limiterConsecutiveFailsByUsernameAndIP.get(usernameIPkey),
+		limiterSlowBruteByIP.get(ipAddr),
+	]);
+
+	let retrySecs = 0;
+
+	// Check if IP or Username + IP is already blocked
+	if (
+		resSlowByIP !== null &&
+		resSlowByIP.consumedPoints > maxWrongAttemptsByIPperDay
+	) {
+		retrySecs = Math.round(resSlowByIP.msBeforeNext / 1000) || 1;
+	} else if (
+		resUsernameAndIP !== null &&
+		resUsernameAndIP.consumedPoints > maxConsecutiveFailsByUsernameAndIP
+	) {
+		retrySecs = Math.round(resUsernameAndIP.msBeforeNext / 1000) || 1;
+	}
+
+	if (retrySecs > 0) {
+		return {
+			status: 429,
+			retryAfter: retrySecs,
+		};
+	} else {
+		if (!bcrypt.compareSync(password, user.password)) {
+			try {
+				const limiterByIp = await limiterSlowBruteByIP.consume(ipAddr);
+				const limiterByUser = await limiterConsecutiveFailsByUsernameAndIP.consume(
+					usernameIPkey,
+				);
+
+				return {
+					status: 400,
+					message: 'Incorrect password.',
+					remainingPoints:
+						limiterByUser.remainingPoints < limiterByIp.remainingPoints
+							? limiterByUser.remainingPoints
+							: limiterByIp.remainingPoints,
+				};
+			} catch (rlRejected) {
+				if (rlRejected instanceof Error) {
+					throw rlRejected;
+				} else {
+					const secs = rlRejected.msBeforeNext / 1000 || 1;
+					return {
+						status: 429,
+						retryAfter: secs,
+					};
+				}
+			}
+		} else {
+			if (resUsernameAndIP !== null && resUsernameAndIP.consumedPoints > 0) {
+				await limiterConsecutiveFailsByUsernameAndIP.delete(usernameIPkey);
+			}
+
+			return {
+				status: 200,
+			};
+		}
+	}
 }

@@ -1,5 +1,5 @@
 import { DataTypes } from 'sequelize';
-import { sequelize } from '../db/connection';
+import { sequelize } from '../db/sequelizeConnection';
 
 const User = sequelize.define(
 	'User',
@@ -31,6 +31,14 @@ const User = sequelize.define(
 		active: {
 			type: DataTypes.BOOLEAN,
 			defaultValue: true,
+		},
+		emailNotifications: {
+			type: DataTypes.BOOLEAN,
+			defaultValue: true,
+		},
+		emailVerificated: {
+			type: DataTypes.BOOLEAN,
+			defaultValue: false,
 		},
 		createdAt: {
 			type: DataTypes.DATE,

@@ -4,14 +4,18 @@ import jwt from 'jsonwebtoken';
 export const verifyAuth = (req, res, next) => {
 	const token = req.get('token');
 
-	jwt.verify(token, 'HT-2020-Prod', (err, decoded) => {
-		if (err) {
-			return res.sendStatus(401);
-		} else {
-			req.user = decoded.data;
-			next();
-		}
-	});
+	if (token) {
+		jwt.verify(token, 'HT-2020-Prod', (err, decoded) => {
+			if (err) {
+				return res.sendStatus(401);
+			} else {
+				req.user = decoded.data;
+				next();
+			}
+		});
+	} else {
+		return res.sendStatus(401);
+	}
 };
 
 // Verify role

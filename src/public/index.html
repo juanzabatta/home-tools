@@ -1,14 +1,36 @@
 <!DOCTYPE html>
 <html lang="es">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Home Tools | En desarrollo</title>
+	</head>
 
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Test</title>
-</head>
+	<body>
+		<h1>Información:</h1>
+		<p>
+			&nbsp;Este proyeccto actualmente esta en desarrollo, solo se encuentra
+			funcionando las rutas relacionadas a usuarios:
+		</p>
+		<ul>
+			<li>Login user ---- /api/user/login ---- POST</li>
+			<li>Register user ---- /api/user/register ---- POST</li>
+			<li>Update user ---- /api/user ---- PUT</li>
+			<li>Change email ---- /api/user/changeEmail ---- PUT</li>
+			<li>Reset password ---- /api/user/resetPassword ---- PUT</li>
+			<li>Verify email ---- /api/user/verifyEmail ---- PUT</li>
+			<li>Delete user ---- /api/user/ ---- DELETE</li>
+		</ul>
 
-<body>
-  <h1>Test</h1>
-</body>
-
+		<p>
+			&nbsp;Todas las rutas estan protegidas contra ataques DoS. Adicionalmente
+			la ruta de login esta protegida con DoS y fuerza bruta.
+		</p>
+		<p>
+			&nbsp;Para ver el proyecto puede ir a gitHub
+			<a href="https://github.com/juanzabatta/home-tools" target="_blank"
+				>Home Tools</a
+			>
+		</p>
+	</body>
 </html>

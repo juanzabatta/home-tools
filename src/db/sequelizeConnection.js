@@ -19,7 +19,7 @@ export const sequelize = new Sequelize(
 
 async function synchronization() {
 	await sequelize.sync({ alter: true });
-	// console.log('All models were synchronized successfully.');
+	console.log('All models were synchronized successfully.');
 }
 
 synchronization();
